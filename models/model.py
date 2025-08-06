@@ -18,7 +18,7 @@ class RoBERTaModernBERTCRF(nn.Module):
         self.style_projector = nn.Linear(style_feature_dim, style_hidden_size)
         self.style_attention = nn.MultiheadAttention(style_hidden_size, 4, batch_first=True)
         self.classifier = nn.Linear(roberta_hidden_size + style_hidden_size, num_labels)
-        self.crf = CRF(num_labels, batch_first=True)
+        self.crf = CRF(num_labels)
         self.dropout = nn.Dropout(0.1)
 
     def compute_info_mask(self, style_features, attention_mask):
@@ -39,5 +39,5 @@ class RoBERTaModernBERTCRF(nn.Module):
         combined_final = torch.cat([fused, style_hidden], dim=-1)
         logits = self.classifier(combined_final)
         mask = attention_mask.bool()
-        preds = self.crf.decode(logits, mask=mask)
+        preds = self.crf.viterbi_decode(logits, mask=mask)
         return preds, info_mask
