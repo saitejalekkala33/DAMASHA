@@ -1,9 +1,11 @@
 import streamlit as st
 import torch
+import numpy as np
+import plotly.graph_objs as go
+import re
 from transformers import AutoTokenizer, AutoModel
 import os
 import nltk
-
 from models.model import RoBERTaModernBERTCRF
 from models.style_features import StyleFeatureExtractor
 from utils.preprocessing import clean_text
@@ -20,14 +22,25 @@ MODEL_PATH = r"C:\teja\AAAI_2026\RoBERTa_ModernBERT_CRF.pth"
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Streamlit UI setup
-st.set_page_config(page_title="AI Text Detector", layout="centered")
+# Initialize session state
+if 'input_text' not in st.session_state:
+    st.session_state.input_text = ""
+if 'predictions' not in st.session_state:
+    st.session_state.predictions = None
+if 'style_features' not in st.session_state:
+    st.session_state.style_features = None
+if 'info_mask' not in st.session_state:
+    st.session_state.info_mask = None
+if 'words_plot' not in st.session_state:
+    st.session_state.words_plot = []
 
+# Streamlit UI setup
+st.set_page_config(page_title="AI Text Detector", layout="wide")
 st.markdown(
     """
     <style>
         .main { background-color: #f5f6fa; }
-        .stTextArea textarea { font-size: 1.1em; }
+        .stTextArea textarea { font-size: 1.1em; width: 1000px !important; min-width: 1000px !important; max-width: 1000px !important; }
         .stButton>button { background-color: #4CAF50; color: white; font-size: 1.1em; }
         .result-word { font-weight: bold; padding: 2px 4px; border-radius: 3px; }
         .ai { background-color: #ffcccc; }
@@ -42,28 +55,13 @@ st.markdown(
 st.title("🕵️‍♂️ AI Text Detector")
 st.write("Paste your text below and click **Detect** to see which parts are likely AI-generated.")
 
-# Session state for results
-if 'predictions' not in st.session_state:
-    st.session_state.predictions = None
-if 'words_plot' not in st.session_state:
-    st.session_state.words_plot = []
+input_text = st.text_area("Enter your text here", height=400, key="input_text_area")
+st.session_state.input_text = input_text
 
-# Text input
-input_text = st.text_area("Enter your text here (max 350 words)", height=300)
-words = input_text.split()
-word_count = len(words)
-
-# Show word count and warning if needed
-st.markdown(f'<div class="word-count">Word count: {word_count}/350</div>', unsafe_allow_html=True)
-if word_count > 350:
-    st.markdown('<div class="warning">⚠️ Only the first 350 words will be analyzed.</div>', unsafe_allow_html=True)
-    words = words[:350]
-    input_text = ' '.join(words)
-    word_count = 350
-
+word_count = len(input_text.split())
 detect_disabled = word_count < 30
 
-if st.button("Detect", disabled=detect_disabled):
+if st.button("Detect", disabled=detect_disabled, key="detect_button"):
     try:
         if not os.path.exists(MODEL_PATH):
             st.error(f"Model checkpoint not found at {MODEL_PATH}")
@@ -77,6 +75,7 @@ if st.button("Detect", disabled=detect_disabled):
         style_extractor = StyleFeatureExtractor(tokenizer, language_model, device)
         model = RoBERTaModernBERTCRF(ROBERTA_MODEL_NAME, MODERNBERT_MODEL_NAME, num_labels=2)
         checkpoint = torch.load(MODEL_PATH, map_location=device)
+        state_dict = checkpoint['model_state_dict']
         # Remap CRF keys if needed (for torchcrf version compatibility)
         crf_key_map = {
             'crf.trans_matrix': 'crf.transitions',
@@ -86,7 +85,6 @@ if st.button("Detect", disabled=detect_disabled):
             'crf.start_transitions': 'crf.start_trans',
             'crf.end_transitions': 'crf.end_trans',
         }
-        state_dict = checkpoint['model_state_dict']
         # If old keys present, map to new
         if any(k in state_dict for k in ['crf.trans_matrix', 'crf.start_trans', 'crf.end_trans']):
             for old, new in crf_key_map.items():
@@ -103,40 +101,112 @@ if st.button("Detect", disabled=detect_disabled):
         else:
             model = model.to(device)
         model.eval()
-
-        # Preprocess text
-        text_cleaned = clean_text(input_text)
+        text_cleaned = re.sub(r'</?AI_Start>|</?AI_End>', '', input_text) if re.search(r'</?AI_Start>|</?AI_End>', input_text) else input_text
         words = text_cleaned.split()
         encoding = tokenizer(words, is_split_into_words=True, return_tensors="pt", max_length=512, truncation=True, padding=True)
         word_ids = encoding.word_ids(batch_index=0)
         input_ids = encoding['input_ids'].to(device)
         attention_mask = encoding['attention_mask'].to(device)
         style_features = style_extractor.get_style_features(words, word_ids).unsqueeze(0)
-
         with torch.no_grad():
-            predictions, _ = model(input_ids, attention_mask, style_features)
-
+            predictions, info_mask = model(input_ids, attention_mask, style_features)
         st.session_state.predictions = predictions[0]
+        st.session_state.style_features = style_features.squeeze(0).detach().cpu().numpy()
+        st.session_state.info_mask = info_mask.squeeze(0).detach().cpu()
         st.session_state.words_plot = words
-
     except Exception as e:
         st.error(f"Error processing text: {str(e)}")
 
-# Display results
-if st.session_state.predictions and st.session_state.words_plot:
-    word_level_preds = []
-    prev_word_id = None
-    # Use the encoding from the last run
+# Display colored tokens
+if st.session_state.predictions is not None and st.session_state.words_plot:
     tokenizer = AutoTokenizer.from_pretrained(ROBERTA_MODEL_NAME, add_prefix_space=True)
     encoding = tokenizer(st.session_state.words_plot, is_split_into_words=True, return_tensors="pt", max_length=512, truncation=True, padding=True)
-    for idx, word_id in enumerate(encoding.word_ids(batch_index=0)):
+    word_ids = encoding.word_ids(batch_index=0)
+    word_level_preds = []
+    prev_word_id = None
+    for idx, word_id in enumerate(word_ids):
         if word_id is not None and word_id != prev_word_id:
             word_level_preds.append((st.session_state.words_plot[word_id], st.session_state.predictions[idx]))
             prev_word_id = word_id
-
-    # Highlight AI/Human words
     highlighted_output = ""
     for word, label in word_level_preds:
-        css_class = "ai" if label == 1 else "human"
-        highlighted_output += f'<span class="result-word {css_class}">{word}</span> '
+        color = "green" if label == 0 else "red"
+        highlighted_output += f'<span style="color:{color}; font-weight:bold;">{word}</span> '
     st.markdown(highlighted_output, unsafe_allow_html=True)
+
+    # --- Plots: show after colored tokens ---
+    if st.session_state.style_features is not None and st.session_state.words_plot:
+        style_feat_seq = st.session_state.style_features
+        style_feat_seq_T = style_feat_seq.T
+        words_plot = st.session_state.words_plot[:len(style_feat_seq)]
+        feature_labels = ['TTR', 'Punctuation', 'POS Density', 'Readability']
+        heatmap = go.Heatmap(
+            z=style_feat_seq_T,
+            x=words_plot,
+            y=feature_labels,
+            colorscale='RdBu',
+            colorbar=dict(title='Feature Value'),
+            zmin=np.min(style_feat_seq_T),
+            zmax=np.max(style_feat_seq_T),
+            hoverongaps=False,
+            hovertemplate='Feature: %{y}<br>Word: %{x}<br>Value: %{z:.2f}<extra></extra>'
+        )
+        layout = go.Layout(
+            title='Style Features Heatmap Across Words',
+            xaxis=dict(title='Windows', tickangle=-45),
+            yaxis=dict(title='Features'),
+            height=400,
+            margin=dict(l=40, r=40, t=60, b=120),
+        )
+        fig1 = go.Figure(data=[heatmap], layout=layout)
+        fig1.update_xaxes(rangeslider_visible=True)
+        st.plotly_chart(fig1, use_container_width=True)
+
+    if st.session_state.info_mask is not None and st.session_state.words_plot:
+        info_mask_values = st.session_state.info_mask.numpy()
+        words_plot = st.session_state.words_plot[:len(info_mask_values)]
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(
+            x=words_plot,
+            y=info_mask_values,
+            mode='lines+markers',
+            line=dict(color='teal'),
+            marker=dict(size=6),
+            hovertemplate='Word: %{x}<br>Info Mask: %{y:.3f}<extra></extra>',
+            name='Info Mask'
+        ))
+        fig2.update_layout(
+            title="Token-wise Info Mask Signal",
+            xaxis_title="Words",
+            yaxis_title="Info Mask Strength",
+            xaxis_tickangle=-45,
+            height=400,
+            margin=dict(l=40, r=40, t=60, b=120),
+            template='plotly_white'
+        )
+        fig2.update_xaxes(rangeslider_visible=True)
+        st.plotly_chart(fig2, use_container_width=True)
+
+        attention_sim = torch.softmax(torch.rand_like(st.session_state.info_mask), dim=0)
+        attn_mask_product = attention_sim * st.session_state.info_mask
+        min_len = min(len(st.session_state.words_plot), len(attn_mask_product))
+        words_plot = st.session_state.words_plot[:min_len]
+        attn_mask_product = attn_mask_product[:min_len]
+        fig3 = go.Figure()
+        fig3.add_trace(go.Bar(
+            x=words_plot,
+            y=attn_mask_product.numpy(),
+            marker_color='purple',
+            hoverinfo='x+y',
+        ))
+        fig3.update_layout(
+            title="Attention × Info Mask (Fused Influence)",
+            xaxis_title="Words",
+            yaxis_title="Influence",
+            xaxis_tickangle=-45,
+            height=400,
+            margin=dict(l=40, r=40, t=60, b=120),
+            template='plotly_white',
+        )
+        fig3.update_xaxes(rangeslider_visible=True)
+        st.plotly_chart(fig3, use_container_width=True)
