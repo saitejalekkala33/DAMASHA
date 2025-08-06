@@ -15,7 +15,7 @@ nltk.download('averaged_perceptron_tagger')
 # Model and tokenizer names
 ROBERTA_MODEL_NAME = 'roberta-base'
 MODERNBERT_MODEL_NAME = 'answerdotai/ModernBERT-Base'
-MODEL_PATH = r"C:\cpp\coding\detectAI\RoBERTa_ModernBERT_CRF.pth"
+MODEL_PATH = r"C:\teja\AAAI_2026\RoBERTa_ModernBERT_CRF.pth"
 
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -70,12 +70,38 @@ if st.button("Detect", disabled=detect_disabled):
             st.stop()
         tokenizer = AutoTokenizer.from_pretrained(ROBERTA_MODEL_NAME, add_prefix_space=True)
         language_model = AutoModel.from_pretrained(ROBERTA_MODEL_NAME, use_safetensors=True)
-        language_model = language_model.to(device)
+        if hasattr(language_model, 'is_meta') and language_model.is_meta:
+            language_model = language_model.to_empty(device=device)
+        else:
+            language_model = language_model.to(device)
         style_extractor = StyleFeatureExtractor(tokenizer, language_model, device)
         model = RoBERTaModernBERTCRF(ROBERTA_MODEL_NAME, MODERNBERT_MODEL_NAME, num_labels=2)
         checkpoint = torch.load(MODEL_PATH, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        model = model.to(device)
+        # Remap CRF keys if needed (for torchcrf version compatibility)
+        crf_key_map = {
+            'crf.trans_matrix': 'crf.transitions',
+            'crf.start_trans': 'crf.start_transitions',
+            'crf.end_trans': 'crf.end_transitions',
+            'crf.transitions': 'crf.trans_matrix',
+            'crf.start_transitions': 'crf.start_trans',
+            'crf.end_transitions': 'crf.end_trans',
+        }
+        state_dict = checkpoint['model_state_dict']
+        # If old keys present, map to new
+        if any(k in state_dict for k in ['crf.trans_matrix', 'crf.start_trans', 'crf.end_trans']):
+            for old, new in crf_key_map.items():
+                if old in state_dict:
+                    state_dict[new] = state_dict.pop(old)
+        # If new keys present, map to old (for older torchcrf)
+        elif any(k in state_dict for k in ['crf.transitions', 'crf.start_transitions', 'crf.end_transitions']):
+            for new, old in crf_key_map.items():
+                if new in state_dict:
+                    state_dict[old] = state_dict.pop(new)
+        model.load_state_dict(state_dict)
+        if hasattr(model, 'is_meta') and model.is_meta:
+            model = model.to_empty(device=device)
+        else:
+            model = model.to(device)
         model.eval()
 
         # Preprocess text
