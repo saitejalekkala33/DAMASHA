@@ -6,6 +6,8 @@ This repository contains a **token-classification model** trained on the **DAMAS
 
 The model aims to **segment mixed human–AI text** at *token level* – i.e., decide for each token whether it was written by a *human* or an *LLM*, even under **syntactic adversarial attacks**.
 
+**HF model RMC:** [`saiteja33/DAMASHA`](https://huggingface.co/saiteja33/DAMASHA-RMC) 
+
 - **Base encoders:**  
   - [`FacebookAI/roberta-base`](https://huggingface.co/FacebookAI/roberta-base)  
   - [`answerdotai/ModernBERT-base`](https://huggingface.co/answerdotai/ModernBERT-base)  
